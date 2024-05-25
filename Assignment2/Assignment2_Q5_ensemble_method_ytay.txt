@@ -1,0 +1,181 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision
+import torchvision.transforms as transforms
+import matplotlib.pyplot as plt
+from torch.optim.lr_scheduler import StepLR 
+
+# Add freeze_support for multiprocessing
+if __name__ == '__main__':
+    torch.multiprocessing.freeze_support()
+
+# Define the neural network architecture with increased depth
+class DeepNet(nn.Module):
+    def __init__(self):
+        super(DeepNet, self).__init__()
+        self.conv1 = nn.Conv2d(3, 64, 3, padding=1)
+        self.conv2 = nn.Conv2d(64, 128, 3, padding=1)
+        self.conv3 = nn.Conv2d(128, 256, 3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.fc1 = nn.Linear(256 * 4 * 4, 1024)
+        self.fc2 = nn.Linear(1024, 512)
+        self.fc3 = nn.Linear(512, 10)
+
+    def forward(self, x):
+        x = self.pool(torch.relu(self.conv1(x)))
+        x = self.pool(torch.relu(self.conv2(x)))
+        x = self.pool(torch.relu(self.conv3(x)))
+        x = x.view(-1, 256 * 4 * 4)
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+# Rest of the code remains the same
+
+# Initialize the network, loss function, and optimizer
+net = DeepNet()  # Use the deeper network
+criterion = nn.CrossEntropyLoss()
+# optimizer = optim.SGD(net.parameters(), lr=0.1, momentum=0.9)
+# scheduler = StepLR(optimizer, step_size=30, gamma=0.1)  # Adjust the step_size and gamma as needed
+optimizer = optim.Adam(net.parameters(), lr=0.001)  # Use Adam optimizer
+scheduler = StepLR(optimizer, step_size=30, gamma=0.1)
+
+# # Load CIFAR-10 dataset
+# transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+# trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+# trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True, num_workers=4)
+
+# Define data augmentation transformations
+transform_train = transforms.Compose([
+    transforms.RandomHorizontalFlip(),  # Randomly flip images horizontally
+    transforms.RandomCrop(32, padding=4),  # Randomly crop images with padding
+    transforms.ToTensor(),  # Convert images to tensors
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalize the image data
+])
+
+# Load CIFAR-10 dataset with data augmentation
+trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True, num_workers=4)
+
+testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+testloader = torch.utils.data.DataLoader(testset, batch_size=128, shuffle=False, num_workers=4)
+
+# Initialize and train multiple models
+num_models = 3
+models = [DeepNet() for _ in range(num_models)]
+criterions = [nn.CrossEntropyLoss() for _ in range(num_models)]
+optimizers = [optim.Adam(model.parameters(), lr=0.001) for model in models]
+
+num_epochs = 5
+ensemble_train_loss_values = []
+ensemble_train_acc_values = []
+ensemble_test_loss_values = []
+ensemble_test_acc_values = []
+
+for model_id, (model, criterion, optimizer) in enumerate(zip(models, criterions, optimizers)):
+    train_loss_values = []
+    train_acc_values = []
+    test_loss_values = []
+    test_acc_values = []
+    
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+        for i, data in enumerate(trainloader, 0):
+            inputs, labels = data
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+    
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+    
+        train_loss_values.append(running_loss / len(trainloader))
+        train_acc_values.append(100 * correct / total)
+    
+        # Test the model
+        model.eval()
+        test_loss = 0.0
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for data in testloader:
+                images, labels = data
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+                test_loss += loss.item()
+    
+                _, predicted = torch.max(outputs.data, 1)
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+    
+        test_loss_values.append(test_loss / len(testloader))
+        test_acc_values.append(100 * correct / total)
+    
+        print(f"Model {model_id + 1}, Epoch {epoch + 1}/{num_epochs}: "
+              f"Train Loss = {train_loss_values[-1]:.4f}, Train Acc = {train_acc_values[-1]:.2f}%, "
+              f"Test Loss = {test_loss_values[-1]:.4f}, Test Acc = {test_acc_values[-1]:.2f}%")
+    
+    # Save training and test metrics for this model
+    ensemble_train_loss_values.append(train_loss_values)
+    ensemble_train_acc_values.append(train_acc_values)
+    ensemble_test_loss_values.append(test_loss_values)
+    ensemble_test_acc_values.append(test_acc_values)
+
+# Combine predictions using majority voting
+def ensemble_predict(models, dataloader):
+    predictions = []
+    for model in models:
+        model.eval()
+        model_predictions = []
+        with torch.no_grad():
+            for data in dataloader:
+                images, _ = data
+                outputs = model(images)
+                _, predicted = torch.max(outputs.data, 1)
+                model_predictions.extend(predicted.tolist())
+        predictions.append(model_predictions)
+    return predictions
+
+# Make predictions using the ensemble of models on the test dataset
+test_predictions = ensemble_predict(models, testloader)
+
+# Combine predictions using majority voting
+final_predictions = []
+for i in range(len(test_predictions[0])):
+    votes = [test_predictions[j][i] for j in range(len(models))]
+    majority_vote = max(set(votes), key=votes.count)
+    final_predictions.append(majority_vote)
+
+# Calculate the ensemble test accuracy
+correct = sum(1 for p, t in zip(final_predictions, testset.targets) if p == t)
+ensemble_test_accuracy = correct / len(testset)
+print(f"Ensemble Test Accuracy: {ensemble_test_accuracy * 100:.2f}%")
+
+# Plotting training and test metrics for each model
+plt.figure(figsize=(12, 8))
+for i in range(num_models):
+    plt.subplot(2, num_models, i + 1)
+    plt.plot(range(num_epochs), ensemble_train_loss_values[i], label=f'Model {i + 1}')
+    plt.xlabel('Epochs')
+    plt.ylabel('Training Loss')
+    plt.legend()
+    plt.title(f'Model {i + 1} Training Loss')
+    
+    plt.subplot(2, num_models, num_models + i + 1)
+    plt.plot(range(num_epochs), ensemble_test_acc_values[i], label=f'Model {i + 1}')
+    plt.xlabel('Epochs')
+    plt.ylabel('Test Accuracy')
+    plt.legend()
+    plt.title(f'Model {i + 1} Test Accuracy')
+
+plt.tight_layout()
+plt.show()
